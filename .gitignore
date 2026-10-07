@@ -25,3 +25,5 @@ n8n-workflow/*
 docker-image/*
 docker-app/*
 .kiro/*
+# Release artifacts
+release/

@@ -1,7 +1,10 @@
 import { Command } from 'commander';
 import { randomBytes } from 'crypto';
-import { existsSync, readFileSync } from 'fs';
-import { resolveConfig } from '../api/config';
+import { existsSync, readFileSync, writeFileSync, unlinkSync, openSync } from 'fs';
+import { spawn } from 'child_process';
+import { connect } from 'net';
+import { createInterface } from 'readline';
+import { resolveConfig, saveConfig } from '../api/config';
 import { AppDB } from '../api/db';
 import { startServer, saveCliToken } from '../api/server';
 import { validateWebhookUrl } from '../api/webhooks';
@@ -30,17 +33,69 @@ const fail = (msg: string): never => {
 
 // ---------------- server ----------------
 const server = program.command('server').description('Run the API + web server');
+const alive = (pid: number) => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+};
+const readPid = (path: string) => {
+  const pid = existsSync(path) ? Number(readFileSync(path, 'utf8')) : 0;
+  return pid && alive(pid) ? pid : 0;
+};
+const portOpen = (port: number) =>
+  new Promise<boolean>((res) => {
+    const s = connect({ port, host: '127.0.0.1' }, () => (s.destroy(), res(true)));
+    s.on('error', () => res(false));
+  });
+
 server
   .command('start')
-  .description('Start the server (API + Web UI)')
+  .description('Start the server (API + Web UI) in the background')
   .option('-p, --port <port>', 'port', (v) => Number(v))
   .option('-H, --host <host>', 'host')
   .option('-t, --tunnel', 'expose publicly via Cloudflare Tunnel (cloudflared)')
   .option('--tunnel-token <token>', 'Cloudflare named-tunnel token (default: $CLOUDFLARE_TUNNEL_TOKEN, else random quick tunnel)')
+  .option('-f, --foreground', 'stay attached to this terminal instead of running in the background')
   .action(async (opts) => {
     const c = resolveConfig({ dataDir: program.opts().data, port: opts.port, host: opts.host });
-    const { db, tunnel } = await startServer(c);
     const shownHost = c.host === '0.0.0.0' ? 'localhost' : c.host;
+
+    if (!opts.foreground) {
+      const running = readPid(c.pidPath);
+      if (running) fail(`Already running (pid ${running}). Use "dailyreport server stop" or "dailyreport server logs".`);
+      const log = openSync(c.logPath, 'a');
+      const child = spawn(process.execPath, [...process.execArgv, ...process.argv.slice(1), '--foreground'], {
+        detached: true,
+        stdio: ['ignore', log, log],
+        env: process.env,
+      });
+      child.unref();
+      for (let i = 0; i < 60 && !(await portOpen(c.port)); i++) {
+        if (child.exitCode !== null) fail(`Server exited during startup. See: dailyreport server logs`);
+        await new Promise((r) => setTimeout(r, 250));
+      }
+      if (!(await portOpen(c.port))) fail('Server did not come up in 15s. See: dailyreport server logs');
+      console.log(`\n  Daily Report started in the background (pid ${child.pid})`);
+      console.log(`  Web : http://${shownHost}:${c.port}`);
+      console.log(`  Logs: dailyreport server logs   Stop: dailyreport server stop\n`);
+      if (readSavedUsers(c.dbPath) === 0) console.log('  No users yet. Run:  dailyreport init\n');
+      return;
+    }
+
+    const { db, tunnel } = await startServer(c);
+    writeFileSync(c.pidPath, String(process.pid));
+    const cleanup = () => {
+      try {
+        if (Number(readFileSync(c.pidPath, 'utf8')) === process.pid) unlinkSync(c.pidPath);
+      } catch {
+        /* already gone */
+      }
+    };
+    process.on('exit', cleanup);
+    for (const sig of ['SIGINT', 'SIGTERM'] as const) process.on(sig, () => process.exit(0));
     console.log(`\n  Daily Report running`);
     console.log(`  Web : http://${shownHost}:${c.port}`);
     console.log(`  API : http://${shownHost}:${c.port}/api`);
@@ -64,25 +119,102 @@ server
     console.log();
   });
 
+server.command('stop').description('Stop the background server').action(() => {
+  const c = cfg();
+  const pid = readPid(c.pidPath);
+  if (!pid) return console.log('Not running.');
+  process.kill(pid, 'SIGTERM');
+  console.log(`Stopped (pid ${pid}).`);
+});
+
+server.command('status').description('Show whether the server is running').action(() => {
+  const c = cfg();
+  const pid = readPid(c.pidPath);
+  console.log(pid ? `Running (pid ${pid}) · http://localhost:${c.port}` : 'Not running.');
+});
+
+server
+  .command('logs')
+  .description('Show the server log (use -f to follow)')
+  .option('-f, --follow', 'follow new output')
+  .option('-n, --lines <n>', 'lines to show', '50')
+  .action((opts) => {
+    const c = cfg();
+    if (!existsSync(c.logPath)) return console.log('No log yet.');
+    spawn('tail', [...(opts.follow ? ['-f'] : []), '-n', String(opts.lines), c.logPath], { stdio: 'inherit' });
+  });
+
+function readSavedUsers(dbPath: string): number {
+  try {
+    const d = new AppDB(dbPath);
+    const n = d.countUsers();
+    d.close();
+    return n;
+  } catch {
+    return -1;
+  }
+}
+
+// ---------------- config ----------------
+program
+  .command('config')
+  .description('Show or change saved settings (port, host); restart the server to apply')
+  .option('-P, --port <port>', 'set port', (v) => Number(v))
+  .option('-H, --host <host>', 'set bind address (0.0.0.0 or 127.0.0.1)')
+  .action((opts) => {
+    const c = cfg();
+    if (opts.port !== undefined) {
+      if (!Number.isInteger(opts.port) || opts.port < 1 || opts.port > 65535) fail('Port must be a number between 1 and 65535');
+      saveConfig(c.dataDir, { port: opts.port });
+    }
+    if (opts.host !== undefined) saveConfig(c.dataDir, { host: opts.host });
+    const now = cfg();
+    console.log(`port: ${now.port}\nhost: ${now.host}\nfile: ${now.dataDir}/config.json`);
+    if ((opts.port !== undefined || opts.host !== undefined) && readPid(now.pidPath)) console.log('Restart to apply: dailyreport server stop && dailyreport server start');
+  });
+
 // ---------------- init ----------------
 program
   .command('init')
   .description('First-time setup: create admin user + access token')
-  .option('-u, --username <name>', 'admin username', 'admin')
+  .option('-u, --username <name>', 'admin username (asked interactively if omitted)')
   .option('-p, --password <password>', 'admin password (random if omitted)')
-  .action((opts) => {
+  .option('-P, --port <port>', 'web/API port (asked interactively if omitted)', (v) => Number(v))
+  .option('-H, --host <host>', 'bind address: 0.0.0.0 (all interfaces) or 127.0.0.1 (this machine only)')
+  .action(async (opts) => {
     const c = cfg();
+    const interactive = process.stdin.isTTY && opts.username === undefined && opts.password === undefined && opts.port === undefined && opts.host === undefined;
+    let username: string = opts.username ?? 'admin';
+    let password: string | undefined = opts.password;
+    let port: number = opts.port ?? c.port;
+    let host: string = opts.host ?? c.host;
+    if (interactive) {
+      const rl = createInterface({ input: process.stdin, output: process.stdout });
+      const ask = (q: string) => new Promise<string>((res) => rl.question(q, res));
+      console.log('\n  Daily Report setup (press Enter to accept the [default])\n');
+      username = (await ask('  Admin username [admin]: ')).trim() || 'admin';
+      password = (await ask('  Admin password [random]: ')).trim() || undefined;
+      const p = (await ask(`  Web/API port [${c.port}]: `)).trim();
+      if (p) port = Number(p);
+      const h = (await ask(`  Allow access from other devices? (y = 0.0.0.0, n = 127.0.0.1 only) [${c.host === '127.0.0.1' ? 'n' : 'Y'}]: `)).trim().toLowerCase();
+      if (h) host = h.startsWith('y') ? '0.0.0.0' : '127.0.0.1';
+      rl.close();
+    }
+    if (!Number.isInteger(port) || port < 1 || port > 65535) fail('Port must be a number between 1 and 65535');
+    if (!/^[a-zA-Z0-9._-]{1,64}$/.test(username)) fail('Username: letters, numbers, . _ - (max 64)');
     withDb((db) => {
       if (db.countUsers() > 0) fail('Already initialized. Use "dailyreport user create" or "dailyreport token create".');
-      const password = opts.password || randomBytes(9).toString('base64url');
-      const user = db.createUser(opts.username, password, 'admin');
+      const pw = password || randomBytes(9).toString('base64url');
+      const user = db.createUser(username, pw, 'admin');
       const { token } = db.createToken(user.id, 'cli');
       saveCliToken(c.cliTokenPath, token);
+      saveConfig(c.dataDir, { port, host });
       console.log('\n  Admin created (shown once, store it safely)');
       console.log(`  Username : ${user.username}`);
-      console.log(`  Password : ${password}`);
+      console.log(`  Password : ${pw}`);
       console.log(`  Token    : ${token}`);
       console.log(`\n  CLI token saved to ${c.cliTokenPath}`);
+      console.log(`  Port     : ${port}  Host: ${host} (saved to ${c.dataDir}/config.json, override with --port/--host)`);
       console.log('  Now run: dailyreport server start\n');
     });
   });
@@ -148,7 +280,8 @@ token.command('revoke <id>').action((id) =>
 // ---------------- remote commands (talk to a running server) ----------------
 function remote(parent: Command) {
   return async (method: string, path: string, body?: unknown) => {
-    const url = parent.optsWithGlobals().url || process.env.DAILYREPORT_URL || `http://localhost:${process.env.PORT || 3000}`;
+    const c0 = cfg();
+    const url = parent.optsWithGlobals().url || process.env.DAILYREPORT_URL || `http://localhost:${c0.port}`;
     const c = cfg();
     const tk = parent.optsWithGlobals().token || process.env.DAILYREPORT_TOKEN || (existsSync(c.cliTokenPath) ? readFileSync(c.cliTokenPath, 'utf8').trim() : '');
     if (!tk) fail('No token. Run "dailyreport init" or pass --token / DAILYREPORT_TOKEN.');
