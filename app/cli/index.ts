@@ -1,6 +1,6 @@
 import { Command } from 'commander';
 import { randomBytes } from 'crypto';
-import { existsSync, readFileSync, writeFileSync, unlinkSync, openSync } from 'fs';
+import { existsSync, readFileSync, writeFileSync, unlinkSync, openSync, rmSync } from 'fs';
 import { spawn } from 'child_process';
 import { join } from 'path';
 import { connect } from 'net';
@@ -247,6 +247,32 @@ async function manageExisting(c: ReturnType<typeof cfg>) {
     rl.close();
   }
 }
+
+// ---------------- reset ----------------
+program
+  .command('reset')
+  .description('Delete ALL local data (database, WhatsApp sessions, keys, settings) and start fresh')
+  .option('-y, --yes', 'skip the confirmation')
+  .action(async (opts) => {
+    const c = cfg();
+    if (!existsSync(c.dataDir)) return console.log('Nothing to reset.');
+    console.log(`\n  This permanently deletes everything in ${c.dataDir}:`);
+    console.log('  users, tokens, message log, Daily Report login/settings, WhatsApp sessions, config.');
+    if (!opts.yes) {
+      if (!process.stdin.isTTY) fail('Not interactive. Pass --yes to confirm.');
+      const rl = createInterface({ input: process.stdin, output: process.stdout });
+      const ans = await new Promise<string>((res) => rl.question('\n  Type "reset" to confirm: ', res));
+      rl.close();
+      if (ans.trim() !== 'reset') return console.log('  Cancelled.');
+    }
+    const pid = readPid(c.pidPath);
+    if (pid) {
+      process.kill(pid, 'SIGTERM');
+      await new Promise((r) => setTimeout(r, 1000));
+    }
+    rmSync(c.dataDir, { recursive: true, force: true });
+    console.log(`  ✓ Removed ${c.dataDir}. Run "dailyreport init" to set up again.\n`);
+  });
 
 // ---------------- init ----------------
 program
