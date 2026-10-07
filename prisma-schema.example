@@ -1,0 +1,67 @@
+// Example Prisma schema for MySQL/PostgreSQL
+// Save this as prisma/schema.prisma in your project
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql" // or "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Session {
+  id        String   @id @default(uuid())
+  sessionId String   @unique
+  creds     String   @db.Text
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  messages  Message[]
+  contacts  Contact[]
+  chats     Chat[]
+
+  @@index([sessionId])
+}
+
+model Message {
+  id        String   @id
+  sessionId String
+  jid       String
+  message   String   @db.Text
+  timestamp DateTime
+  fromMe    Boolean
+
+  session   Session  @relation(fields: [sessionId], references: [sessionId], onDelete: Cascade)
+
+  @@index([sessionId, jid])
+  @@index([timestamp])
+}
+
+model Contact {
+  id        String  @id
+  sessionId String
+  jid       String
+  name      String?
+  notify    String?
+  data      String  @db.Text
+
+  session   Session @relation(fields: [sessionId], references: [sessionId], onDelete: Cascade)
+
+  @@unique([sessionId, jid])
+  @@index([sessionId])
+}
+
+model Chat {
+  id        String   @id
+  sessionId String
+  jid       String
+  data      String   @db.Text
+  timestamp DateTime
+
+  session   Session  @relation(fields: [sessionId], references: [sessionId], onDelete: Cascade)
+
+  @@unique([sessionId, jid])
+  @@index([sessionId])
+  @@index([timestamp])
+}
