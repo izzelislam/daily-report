@@ -1,6 +1,6 @@
 {
   "name": "dailyreport",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "private": true,
   "description": "Daily Report - WhatsApp dashboard, API and CLI built on Wacap Wrapper",
   "bin": {
