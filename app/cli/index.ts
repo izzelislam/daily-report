@@ -193,6 +193,8 @@ program
   .option('-H, --host <host>', 'bind address: 0.0.0.0 (all interfaces) or 127.0.0.1 (this machine only)')
   .action(async (opts) => {
     const c = cfg();
+    if (readSavedUsers(c.dbPath) > 0)
+      fail(`Already initialized (port ${c.port}). To change the port/host run: dailyreport config --port <port> [--host <host>]. Users: "dailyreport user create", tokens: "dailyreport token create".`);
     const interactive = process.stdin.isTTY && opts.username === undefined && opts.password === undefined && opts.port === undefined && opts.host === undefined;
     let username: string = opts.username ?? 'admin';
     let password: string | undefined = opts.password;
