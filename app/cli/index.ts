@@ -183,6 +183,71 @@ program
     if ((opts.port !== undefined || opts.host !== undefined) && readPid(now.pidPath)) console.log('Restart to apply: dailyreport server stop && dailyreport server start');
   });
 
+
+/** `init` on an already-initialized install: a small menu instead of an error. */
+async function manageExisting(c: ReturnType<typeof cfg>) {
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  const ask = (q: string) => new Promise<string>((res) => rl.question(q, res));
+  const running = () => readPid(c.pidPath);
+  console.log('\n  Daily Report is already set up.');
+  try {
+    for (;;) {
+      const now = resolveConfig({ dataDir: c.dataDir });
+      console.log(`\n  Current: port ${now.port} · host ${now.host} · data ${now.dataDir}`);
+      console.log('    1) Change port / host');
+      console.log('    2) Add a user');
+      console.log('    3) Create an access token');
+      console.log('    4) Reset a user password');
+      console.log('    0) Exit');
+      const pick = (await ask('\n  Choose [0-4]: ')).trim();
+      if (pick === '' || pick === '0') break;
+      if (pick === '1') {
+        const p = (await ask(`  Web/API port [${now.port}]: `)).trim();
+        const port = p ? Number(p) : now.port;
+        if (!Number.isInteger(port) || port < 1 || port > 65535) {
+          console.log('  ✗ Port must be a number between 1 and 65535');
+          continue;
+        }
+        const h = (await ask(`  Allow access from other devices? (y = 0.0.0.0, n = 127.0.0.1 only) [${now.host === '127.0.0.1' ? 'n' : 'Y'}]: `)).trim().toLowerCase();
+        const host = h ? (h.startsWith('y') ? '0.0.0.0' : '127.0.0.1') : now.host;
+        saveConfig(c.dataDir, { port, host });
+        console.log(`  ✓ Saved: port ${port}, host ${host}`);
+        if (running()) console.log('  Restart to apply: dailyreport server stop && dailyreport server start');
+      } else if (pick === '2') {
+        const name = (await ask('  Username: ')).trim();
+        if (!/^[a-zA-Z0-9._-]{1,64}$/.test(name)) { console.log('  ✗ Username: letters, numbers, . _ - (max 64)'); continue; }
+        const role = (await ask('  Role (admin/user) [user]: ')).trim() || 'user';
+        if (!['admin', 'user'].includes(role)) { console.log('  ✗ Role must be admin or user'); continue; }
+        const pw = (await ask('  Password [random]: ')).trim() || randomBytes(9).toString('base64url');
+        withDb((db) => {
+          if (db.getUserByName(name)) return console.log(`  ✗ User "${name}" already exists`);
+          db.createUser(name, pw, role as 'admin' | 'user');
+          console.log(`  ✓ Created ${role} "${name}"  Password: ${pw}`);
+        });
+      } else if (pick === '3') {
+        const owner = (await ask('  Token owner (username) [admin]: ')).trim() || 'admin';
+        const label = (await ask('  Token label [cli]: ')).trim() || 'cli';
+        const save = (await ask('  Save as the CLI default token? [y/N]: ')).trim().toLowerCase().startsWith('y');
+        withDb((db) => {
+          const u = db.getUserByName(owner);
+          if (!u) return console.log(`  ✗ User "${owner}" not found`);
+          const { token: t } = db.createToken(u.id, label);
+          if (save) saveCliToken(c.cliTokenPath, t);
+          console.log(`  ✓ Token (shown once): ${t}`);
+        });
+      } else if (pick === '4') {
+        const name = (await ask('  Username: ')).trim();
+        const pw = (await ask('  New password [random]: ')).trim() || randomBytes(9).toString('base64url');
+        withDb((db) => console.log(db.setPassword(name, pw) ? `  ✓ Password updated  Password: ${pw}` : `  ✗ User "${name}" not found`));
+      } else {
+        console.log('  ✗ Pick a number from 0 to 4');
+      }
+    }
+  } finally {
+    rl.close();
+  }
+}
+
 // ---------------- init ----------------
 program
   .command('init')
@@ -193,8 +258,11 @@ program
   .option('-H, --host <host>', 'bind address: 0.0.0.0 (all interfaces) or 127.0.0.1 (this machine only)')
   .action(async (opts) => {
     const c = cfg();
-    if (readSavedUsers(c.dbPath) > 0)
-      fail(`Already initialized (port ${c.port}). To change the port/host run: dailyreport config --port <port> [--host <host>]. Users: "dailyreport user create", tokens: "dailyreport token create".`);
+    if (readSavedUsers(c.dbPath) > 0) {
+      if (!process.stdin.isTTY) fail('Already initialized. Use "dailyreport config", "dailyreport user create" or "dailyreport token create".');
+      await manageExisting(c);
+      return;
+    }
     const interactive = process.stdin.isTTY && opts.username === undefined && opts.password === undefined && opts.port === undefined && opts.host === undefined;
     let username: string = opts.username ?? 'admin';
     let password: string | undefined = opts.password;
