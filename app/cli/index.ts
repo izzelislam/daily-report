@@ -2,6 +2,7 @@ import { Command } from 'commander';
 import { randomBytes } from 'crypto';
 import { existsSync, readFileSync, writeFileSync, unlinkSync, openSync } from 'fs';
 import { spawn } from 'child_process';
+import { join } from 'path';
 import { connect } from 'net';
 import { createInterface } from 'readline';
 import { resolveConfig, saveConfig } from '../api/config';
@@ -9,11 +10,20 @@ import { AppDB } from '../api/db';
 import { startServer, saveCliToken } from '../api/server';
 import { validateWebhookUrl } from '../api/webhooks';
 
+// dist/cli.js and cli/index.ts both sit one level below the package root.
+const pkgVersion = (): string => {
+  try {
+    return JSON.parse(readFileSync(join(__dirname, '..', 'package.json'), 'utf8')).version;
+  } catch {
+    return 'unknown';
+  }
+};
+
 const program = new Command();
 program
   .name('dailyreport')
   .description('Daily Report - WhatsApp dashboard, API and CLI')
-  .version('0.1.0')
+  .version(pkgVersion())
   .option('-d, --data <dir>', 'data directory (default: ~/.dailyreport or $DAILYREPORT_HOME)');
 
 const cfg = () => resolveConfig({ dataDir: program.opts().data });
