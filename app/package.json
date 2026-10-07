@@ -1,20 +1,20 @@
 {
   "name": "dailyreport",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "private": true,
   "description": "Daily Report - WhatsApp dashboard, API and CLI built on Wacap Wrapper",
   "bin": {
     "dailyreport": "./bin/dailyreport.js"
   },
   "scripts": {
-    "dev:api": "tsx watch cli/index.ts server start",
+    "dev:api": "tsx watch cli/index.ts server start --foreground",
     "dev:web": "vite --config web/vite.config.mts",
     "build:web": "vite build --config web/vite.config.mts",
     "build:cli": "tsup",
     "build": "npm run build:web && npm run build:cli",
-    "start": "node bin/dailyreport.js server start",
+    "start": "node bin/dailyreport.js server start --foreground",
     "dev": "concurrently -k -n api,web -c blue,green \"npm:dev:api\" \"npm:dev:web\"",
-    "share": "npm run build && node bin/dailyreport.js server start --tunnel"
+    "share": "npm run build && node bin/dailyreport.js server start --foreground --tunnel"
   },
   "dependencies": {
     "@fastify/cors": "10.0.2",
